@@ -299,7 +299,7 @@ async def process_deposit_complete(message: types.Message, state: FSMContext):
 
     await state.finish()
 
-# --- এডমিন অ্যাকশন ---
+# --- এডমিন অ্যাকশন (UPDATED FOR FIX) ---
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('appr:'))
 async def approve_deposit(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID: 
@@ -312,7 +312,14 @@ async def approve_deposit(callback_query: types.CallbackQuery):
 
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # প্রথমে চেক করবে আপডেট হলো কি না
     cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+    
+    # যদি আপডেট না হয় (মানে ইউজার নতুন বা ডাটাবেসে নেই), তাহলে তাকে নতুন করে ব্যালেন্সসহ এড করবে
+    if cursor.rowcount == 0:
+        cursor.execute("INSERT INTO users (user_id, balance) VALUES (%s, %s)", (user_id, amount))
+        
     conn.commit()
     cursor.close()
     conn.close()
