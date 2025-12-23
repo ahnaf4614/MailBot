@@ -16,6 +16,7 @@ from keep_alive import keep_alive
 API_TOKEN = '7953880175:AAHqQiuPH24qJKNYcJzo-_FpBdCrt7Eaqto'
 ADMIN_ID = 5550550932
 ADMIN_GROUP_ID = -5046885109
+SUPPORT_USERNAME = "Ahnaf7x"  # তোমার পার্সোনাল ইউজারনেম
 PAYMENT_NUMBER = "01769990607"
 
 # লগিং এবং মেমোরি
@@ -31,36 +32,33 @@ def get_db_connection():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     return conn
 
-# টেবিল তৈরি করা (যদি না থাকে)
+# টেবিল তৈরি করা
 def create_tables():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    # Users table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY, 
-            balance REAL DEFAULT 0
-        )
-    ''')
-    # Stock table (SERIAL ব্যবহার করা হয়েছে auto-increment এর জন্য)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS stock (
-            id SERIAL PRIMARY KEY, 
-            type TEXT, 
-            data TEXT, 
-            status TEXT DEFAULT 'unsold'
-        )
-    ''')
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY, 
+                balance REAL DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stock (
+                id SERIAL PRIMARY KEY, 
+                type TEXT, 
+                data TEXT, 
+                status TEXT DEFAULT 'unsold'
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("Database connected and tables created!")
+    except Exception as e:
+        print(f"Database Error: {e}")
 
-# শুরুতে টেবিল বানিয়ে নিবে
-try:
-    create_tables()
-    print("Database connected and tables created!")
-except Exception as e:
-    print(f"Database Error: {e}")
+create_tables()
 
 # --- স্টেপ বা ধাপ ---
 class BuyState(StatesGroup):
@@ -68,7 +66,7 @@ class BuyState(StatesGroup):
     waiting_for_confirm = State()
 
 class ReplaceState(StatesGroup):
-    waiting_for_complain = State()
+    waiting_for_mail_check = State() # মেইল চেক করার ধাপ
 
 class DepositState(StatesGroup):
     waiting_for_amount = State()
@@ -94,17 +92,49 @@ async def send_welcome(message: types.Message, state: FSMContext):
     await state.finish()
     user_id = message.from_user.id
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    # PostgreSQL এ INSERT OR IGNORE এর বদলে ON CONFLICT ব্যবহার হয়
-    cursor.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB Error on Start: {e}")
     
     await message.reply(f"স্বাগতম {message.from_user.first_name}! \nপ্রফেশনাল ডিজিটাল শপে আপনাকে স্বাগতম।", reply_markup=get_main_menu())
 
-# --- এডমিন স্টক এড ---
+# --- 🔥 Feature 1: ADMIN ADD MONEY (Manual) ---
+@dp.message_handler(commands=['addmoney'])
+async def admin_add_money(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    
+    try:
+        # কমান্ড ফরম্যাট: /addmoney 123456 50
+        _, target_id, amount = message.text.split()
+        target_id = int(target_id)
+        amount = float(amount)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # ব্যালেন্স আপডেট
+        cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, target_id))
+        if cursor.rowcount == 0:
+            cursor.execute("INSERT INTO users (user_id, balance) VALUES (%s, %s)", (target_id, amount))
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        await message.reply(f"✅ User `{target_id}` এর একাউন্টে {amount} TK যুক্ত করা হয়েছে।")
+        try: await bot.send_message(target_id, f"🎉 অভিনন্দন! এডমিন আপনার ব্যালেন্সে {amount} TK যুক্ত করেছেন।")
+        except: pass
+        
+    except:
+        await message.reply("⚠️ ভুল কমান্ড! ব্যবহার: `/addmoney user_id amount`")
+
+# --- 🔥 Feature 2: STOCK ADD & BROADCAST ---
 @dp.message_handler(commands=['addstock'])
 async def add_stock(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
@@ -123,11 +153,24 @@ async def add_stock(message: types.Message):
                 cursor.execute("INSERT INTO stock (type, data) VALUES (%s, %s)", (item_type, item.strip()))
                 count += 1
         
+        # ইউজারদের লিস্ট বের করা (ব্রডকাস্টের জন্য)
+        cursor.execute("SELECT user_id FROM users")
+        all_users = cursor.fetchall()
+        
         conn.commit()
         cursor.close()
         conn.close()
         
-        await message.reply(f"✅ {count}টি {item_type} মেইল স্টকে যুক্ত হয়েছে!")
+        await message.reply(f"✅ {count}টি {item_type} মেইল যুক্ত হয়েছে এবং ব্রডকাস্ট শুরু হয়েছে!")
+        
+        # 📢 সবাইকে মেসেজ পাঠানো
+        success_count = 0
+        for user in all_users:
+            try:
+                await bot.send_message(user[0], f"📢 **New Stock Alert!**\n\n🔥 নতুন {count}টি **{item_type.upper()}** মেইল এড করা হয়েছে!\n🛒 এখনই কিনুন!")
+                success_count += 1
+            except: pass
+            
     except: 
         await message.reply("ভুল! সঠিক নিয়ম: /addstock edu email:pass")
 
@@ -135,7 +178,6 @@ async def add_stock(message: types.Message):
 @dp.message_handler(lambda message: message.text == "💰 Deposit / Balance")
 async def check_balance_deposit(message: types.Message):
     user_id = message.from_user.id
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
@@ -144,7 +186,6 @@ async def check_balance_deposit(message: types.Message):
     conn.close()
     
     bal = result[0] if result else 0
-    
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("➕ Deposit Money", callback_data="start_deposit"))
     await message.reply(f"💰 **আপনার ব্যালেন্স:** {bal} TK\n\nআপনি কি ব্যালেন্স এড করতে চান?", parse_mode="Markdown", reply_markup=keyboard)
@@ -153,34 +194,33 @@ async def check_balance_deposit(message: types.Message):
 async def show_stock(message: types.Message):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT COUNT(*) FROM stock WHERE type='edu' AND status='unsold'")
     edu = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM stock WHERE type='hotmail' AND status='unsold'")
     hot = cursor.fetchone()[0]
-    
     cursor.close()
     conn.close()
-    
     await message.reply(f"📦 **বর্তমান স্টক:**\n\n🔹 Edu Mail: `{edu}` pcs\n🔹 Hotmail: `{hot}` pcs", parse_mode="Markdown")
 
 @dp.message_handler(lambda message: message.text == "👤 Profile")
 async def show_profile(message: types.Message):
     user_id = message.from_user.id
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
     result = cursor.fetchone()
     cursor.close()
     conn.close()
-    
     bal = result[0] if result else 0
     await message.reply(f"👤 **User Profile**\n\n🆔 ID: `{user_id}`\n💰 Balance: {bal} TK", parse_mode="Markdown")
 
+# --- 🔥 Feature 3: UPDATED SUPPORT ---
 @dp.message_handler(lambda message: message.text == "🆘 Support")
 async def support(message: types.Message):
-    await message.reply(f"📞 হেল্পলাইনের জন্য এডমিনকে মেসেজ দিন: tg://user?id={ADMIN_ID}")
+    # সরাসরি ইনবক্স লিংক
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("Message Admin", url=f"https://t.me/{SUPPORT_USERNAME}"))
+    await message.reply(f"📞 হেল্পলাইনের জন্য নিচে ক্লিক করুন:", reply_markup=kb)
 
 @dp.message_handler(lambda message: message.text == "🔙 Cancel", state="*")
 @dp.message_handler(lambda message: message.text == "🔙 Main Menu", state="*")
@@ -188,8 +228,7 @@ async def back_home(message: types.Message, state: FSMContext):
     await state.finish()
     await message.reply("🏠 মেইন মেনু:", reply_markup=get_main_menu())
 
-# --- 🚀 DEPOSIT SYSTEM ---
-
+# --- DEPOSIT SYSTEM ---
 @dp.callback_query_handler(lambda c: c.data == 'start_deposit')
 async def process_deposit_start(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
@@ -205,7 +244,6 @@ async def process_deposit_amount(message: types.Message, state: FSMContext):
         await state.finish()
         await message.reply("বাতিল করা হয়েছে।", reply_markup=get_main_menu())
         return
-
     amount_str = message.text.replace(" BDT", "").replace("Tk", "").strip()
     try:
         amount = float(amount_str)
@@ -213,43 +251,27 @@ async def process_deposit_amount(message: types.Message, state: FSMContext):
     except:
         await message.reply("❌ ভুল অ্যামাউন্ট! সর্বনিম্ন ১০ টাকা।")
         return
-
     await state.update_data(deposit_amount=amount)
-
     method_kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     method_kb.add("bKash", "Nagad", "Rocket")
     method_kb.add("🔙 Cancel")
-
     await message.reply(f"✅ {amount} TK সিলেক্ট করেছেন।\n\n👇 পেমেন্ট মেথড সিলেক্ট করুন:", reply_markup=method_kb)
     await DepositState.waiting_for_method.set()
 
 @dp.message_handler(state=DepositState.waiting_for_method)
 async def process_deposit_method(message: types.Message, state: FSMContext):
     method = message.text.strip()
-
     if "Cancel" in method:
         await state.finish()
         await message.reply("বাতিল করা হয়েছে।", reply_markup=get_main_menu())
         return
-
     if method not in ["bKash", "Nagad", "Rocket"]:
         await message.reply("❌ ভুল মেথড! দয়া করে নিচের বাটন থেকে সিলেক্ট করুন।")
         return
-
     await state.update_data(method=method)
-
     data = await state.get_data()
     amount = data['deposit_amount']
-
-    msg = (
-        f"📩 **Payment Info:**\n\n"
-        f"💳 Method: **{method}**\n"
-        f"📞 Number: `{PAYMENT_NUMBER}` (Personal)\n"
-        f"💰 Amount: **{amount} TK**\n\n"
-        f"⚠️ নিয়ম:\n১. এই নাম্বারে টাকা Send Money করুন।\n"
-        f"২. এরপর আপনার **Sender Number** অথবা **TrxID** নিচে লিখে পাঠান:"
-    )
-
+    msg = (f"📩 **Payment Info:**\n\n💳 Method: **{method}**\n📞 Number: `{PAYMENT_NUMBER}` (Personal)\n💰 Amount: **{amount} TK**\n\n⚠️ নিয়ম:\n১. এই নাম্বারে টাকা Send Money করুন।\n২. এরপর আপনার **Sender Number** অথবা **TrxID** নিচে লিখে পাঠান:")
     await message.reply(msg, parse_mode="Markdown", reply_markup=get_cancel_menu())
     await DepositState.waiting_for_trx.set()
 
@@ -259,83 +281,45 @@ async def process_deposit_complete(message: types.Message, state: FSMContext):
         await state.finish()
         await message.reply("বাতিল করা হয়েছে।", reply_markup=get_main_menu())
         return
-
     trx_info = message.text
     data = await state.get_data()
     amount = data['deposit_amount']
     method = data['method']
     user = message.from_user
     now = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
-
-    receipt_msg = (
-        f"⏳ **Deposit Pending!**\n\n"
-        f"👤 User: {user.first_name}\n"
-        f"💰 Amount: {amount} TK\n"
-        f"💳 Method: {method}\n"
-        f"📝 Info: `{trx_info}`\n\n"
-        f"✅ রিকোয়েস্ট জমা হয়েছে। এডমিন চেক করে এপ্রুভ করবেন।"
-    )
-    await message.reply(receipt_msg, parse_mode="Markdown", reply_markup=get_main_menu())
+    receipt_msg = (f"⏳ **Deposit Pending!**\n\n👤 User: {user.first_name}\n💰 Amount: {amount} TK\n💳 Method: {method}\n📝 Info: `{trx_info}`\n\n✅ রিকোয়েস্ট জমা হয়েছে।")
+    try: await message.reply(receipt_msg, parse_mode="Markdown", reply_markup=get_main_menu())
+    except: await message.reply("✅ রিকোয়েস্ট জমা হয়েছে। এডমিন শীঘ্রই চেক করবেন।", reply_markup=get_main_menu())
 
     admin_kb = InlineKeyboardMarkup()
-    admin_kb.add(
-        InlineKeyboardButton("✅ Approve", callback_data=f"appr:{user.id}:{amount}"),
-        InlineKeyboardButton("❌ Decline", callback_data=f"decl:{user.id}")
-    )
-    admin_msg = (
-        f"🔔 **New Deposit Request!**\n\n"
-        f"👤 User: {user.first_name} (@{user.username})\n"
-        f"🆔 ID: `{user.id}`\n"
-        f"💰 Amount: **{amount} TK**\n"
-        f"💳 Method: {method}\n"
-        f"📝 Info: `{trx_info}`\n"
-        f"🕒 Time: {now}"
-    )
-
-    try:
-        await bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="Markdown", reply_markup=admin_kb)
-    except:
-        await bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown", reply_markup=admin_kb)
-
+    admin_kb.add(InlineKeyboardButton("✅ Approve", callback_data=f"appr:{user.id}:{amount}"), InlineKeyboardButton("❌ Decline", callback_data=f"decl:{user.id}"))
+    admin_msg = (f"🔔 New Deposit Request!\n\nUser: {user.first_name} (@{user.username})\nID: {user.id}\nAmount: {amount} TK\nMethod: {method}\nInfo: {trx_info}\nTime: {now}")
+    try: await bot.send_message(ADMIN_GROUP_ID, admin_msg, reply_markup=admin_kb)
+    except: await bot.send_message(ADMIN_ID, admin_msg, reply_markup=admin_kb)
     await state.finish()
 
-# --- এডমিন অ্যাকশন (UPDATED FOR FIX) ---
+# --- এডমিন অ্যাকশন ---
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('appr:'))
 async def approve_deposit(callback_query: types.CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID: 
-        await callback_query.answer("⚠️ Only Admin!", show_alert=True)
-        return
-
+    if callback_query.from_user.id != ADMIN_ID: return
     _, user_id, amount = callback_query.data.split(':')
     user_id = int(user_id)
     amount = float(amount)
-
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # প্রথমে চেক করবে আপডেট হলো কি না
     cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
-    
-    # যদি আপডেট না হয় (মানে ইউজার নতুন বা ডাটাবেসে নেই), তাহলে তাকে নতুন করে ব্যালেন্সসহ এড করবে
     if cursor.rowcount == 0:
         cursor.execute("INSERT INTO users (user_id, balance) VALUES (%s, %s)", (user_id, amount))
-        
     conn.commit()
     cursor.close()
     conn.close()
-
-    await bot.edit_message_text(f"✅ **Approved!**\nUser: `{user_id}`\nAdded: {amount} TK", 
-                                chat_id=callback_query.message.chat.id, 
-                                message_id=callback_query.message.message_id, 
-                                parse_mode="Markdown")
-
+    await bot.edit_message_text(f"✅ **Approved!**\nUser: `{user_id}`\nAdded: {amount} TK", chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id, parse_mode="Markdown")
     try: await bot.send_message(user_id, f"🎉 অভিনন্দন! আপনার {amount} TK ডিপোজিট এপ্রুভ হয়েছে।")
     except: pass
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('decl:'))
 async def decline_deposit(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID: return
-
     _, user_id = callback_query.data.split(':')
     await bot.edit_message_text(f"❌ **Declined!**", chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
     try: await bot.send_message(int(user_id), "❌ আপনার ডিপোজিট রিকোয়েস্ট বাতিল করা হয়েছে।")
@@ -352,14 +336,12 @@ async def buy_start(message: types.Message):
 @dp.message_handler(lambda message: "1.50 TK" in message.text)
 async def process_buy_request(message: types.Message, state: FSMContext):
     item_type = 'edu' if 'Edu' in message.text else 'hotmail'
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM stock WHERE type=%s AND status='unsold'", (item_type,))
     stock_count = cursor.fetchone()[0]
     cursor.close()
     conn.close()
-
     if stock_count == 0:
         await message.reply(f"⚠️ দুঃখিত! এই মুহূর্তে **{item_type.upper()}** স্টক নেই।", parse_mode="Markdown")
         return
@@ -371,7 +353,7 @@ async def process_buy_request(message: types.Message, state: FSMContext):
 async def process_quantity(message: types.Message, state: FSMContext):
     if "Cancel" in message.text:
         await state.finish()
-        await message.reply("বাতিল করা হয়েছে।", reply_markup=get_main_menu())
+        await message.reply("বাতিল।", reply_markup=get_main_menu())
         return
     try:
         qty = int(message.text)
@@ -379,36 +361,29 @@ async def process_quantity(message: types.Message, state: FSMContext):
     except:
         await message.reply("❌ ভুল সংখ্যা!")
         return
-    
     data = await state.get_data()
     item_type = data['item_type']
     total_cost = qty * data['price']
-    
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT COUNT(*) FROM stock WHERE type=%s AND status='unsold'", (item_type,))
     if cursor.fetchone()[0] < qty:
         await message.reply(f"⚠️ পর্যাপ্ত স্টক নেই।")
         cursor.close()
         conn.close()
         return
-    
     user_id = message.from_user.id
     cursor.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
     bal_result = cursor.fetchone()
     current_balance = bal_result[0] if bal_result else 0
-    
     if current_balance < total_cost:
         await message.reply(f"❌ ব্যালেন্স কম! প্রয়োজন: {total_cost} TK।", reply_markup=get_main_menu())
         await state.finish()
         cursor.close()
         conn.close()
         return
-    
     cursor.close()
     conn.close()
-
     conf_kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     conf_kb.add("✅ Confirm", "❌ Cancel")
     await state.update_data(qty=qty, total_cost=total_cost)
@@ -420,30 +395,21 @@ async def process_confirm(message: types.Message, state: FSMContext):
     if message.text == "✅ Confirm":
         data = await state.get_data()
         user_id = message.from_user.id
-        
         conn = get_db_connection()
         cursor = conn.cursor()
-        
         try:
-            # 1. ব্যালেন্স কাটা
             cursor.execute("UPDATE users SET balance = balance - %s WHERE user_id=%s", (data['total_cost'], user_id))
-            
-            # 2. আইটেম সিলেক্ট করা (LIMIT ব্যবহার করে)
             cursor.execute("SELECT id, data FROM stock WHERE type=%s AND status='unsold' LIMIT %s", (data['item_type'], data['qty']))
             items = cursor.fetchall()
-            
             msg_list = []
             for i, item in enumerate(items, 1):
-                # 3. স্ট্যাটাস sold করা
                 cursor.execute("UPDATE stock SET status='sold' WHERE id=%s", (item[0],))
-                
                 raw = item[1]
                 if ":" in raw:
                     e, p = raw.split(":", 1)
                     msg_list.append(f"📦 **Mail #{i}**\n📧 `{e.strip()}`\n🔑 `{p.strip()}`")
                 else:
                     msg_list.append(f"📦 **Mail #{i}**\n`{raw}`")
-            
             conn.commit()
             await message.reply(f"✅ সফল!\n\n" + "\n\n".join(msg_list), parse_mode="Markdown", reply_markup=get_main_menu())
         except Exception as e:
@@ -452,30 +418,55 @@ async def process_confirm(message: types.Message, state: FSMContext):
         finally:
             cursor.close()
             conn.close()
-            
     else:
         await message.reply("বাতিল করা হলো।", reply_markup=get_main_menu())
     await state.finish()
 
-# --- রিপ্লেসমেন্ট ---
+# --- 🔥 Feature 4: SMART REPLACEMENT SYSTEM ---
 @dp.message_handler(lambda message: message.text == "🔄 Replacement")
 async def replacement_start(message: types.Message):
-    await message.reply("⚠️ সমস্যা বিস্তারিত লিখুন:", reply_markup=get_cancel_menu())
-    await ReplaceState.waiting_for_complain.set()
+    await message.reply(
+        "📝 **Replacement Rule:**\n\n"
+        "শুধুমাত্র সেই মেইলগুলো দিন যেগুলো **আমাদের বট থেকে কেনা**।\n"
+        "বাইরের মেইল দিলে অটোমেটিক রিজেক্ট হবে।\n\n"
+        "👇 **নষ্ট মেইল (Email:Pass) এখানে পেস্ট করুন:**", 
+        reply_markup=get_cancel_menu()
+    )
+    await ReplaceState.waiting_for_mail_check.set()
 
-@dp.message_handler(state=ReplaceState.waiting_for_complain)
-async def process_complain(message: types.Message, state: FSMContext):
+@dp.message_handler(state=ReplaceState.waiting_for_mail_check)
+async def process_replacement_check(message: types.Message, state: FSMContext):
     if "Cancel" in message.text:
         await state.finish()
         await message.reply("বাতিল।", reply_markup=get_main_menu())
         return
 
-    try: await bot.send_message(ADMIN_GROUP_ID, f"🚨 **Replacement Req**\nUser: `{message.from_user.id}`\nMsg: {message.text}", parse_mode="Markdown")
-    except: await bot.send_message(ADMIN_ID, f"🚨 **Replacement Req**\nUser: `{message.from_user.id}`\nMsg: {message.text}", parse_mode="Markdown")
+    mail_text = message.text.strip()
+    
+    # 🕵️‍♂️ Database Check: এই মেইলটা কি আমাদের ডাটাবেসে Sold হিসেবে আছে?
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # আমরা চেক করছি যে ইউজারের পাঠানো টেক্সট আমাদের কোনো 'sold' ডাটার সাথে মিলে কি না
+    # (Checking if the user's text exists in our 'sold' stock)
+    cursor.execute("SELECT id FROM stock WHERE data LIKE %s AND status='sold'", ('%' + mail_text + '%',))
+    result = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
 
-    await message.reply("✅ এডমিনকে জানানো হয়েছে।", reply_markup=get_main_menu())
+    if result:
+        # ✅ মেইল পাওয়া গেছে! এডমিনকে জানাবে
+        try: await bot.send_message(ADMIN_GROUP_ID, f"🚨 **Verified Replacement Req**\nUser: `{message.from_user.id}`\nMail Found in DB ✅\nMsg: `{mail_text}`", parse_mode="Markdown")
+        except: await bot.send_message(ADMIN_ID, f"🚨 **Verified Replacement Req**\nUser: `{message.from_user.id}`\nMail Found in DB ✅\nMsg: `{mail_text}`", parse_mode="Markdown")
+        
+        await message.reply("✅ আপনার রিকোয়েস্ট ভেরিফাইড এবং এডমিনের কাছে পাঠানো হয়েছে।", reply_markup=get_main_menu())
+    else:
+        # ❌ মেইল পাওয়া যায়নি (ফেক বা বাইরের মেইল)
+        await message.reply("❌ **Rejected!**\n\nএই মেইলটি আমাদের ডাটাবেসে বা রিসেন্ট সেলের তালিকায় পাওয়া যায়নি।\nশুধুমাত্র এই বট থেকে কেনা মেইল রিপ্লেস করা হয়।", reply_markup=get_main_menu())
+
     await state.finish()
 
 if __name__ == '__main__':
-    keep_alive()  # বট জাগিয়ে রাখার এলার্ম
+    keep_alive()
     executor.start_polling(dp, skip_updates=True)
