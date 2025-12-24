@@ -13,7 +13,7 @@ from aiogram.utils import executor
 from keep_alive import keep_alive  
 
 # --- কনফিগারেশন ---
-API_TOKEN = '7953880175:AAHqQiuPH24qJKNYcJzo-_FpBdCrt7Eaqto'
+API_TOKEN = '7953880175:AAEinE3UOyVdG5V9PsvvU6444agVZf0zLpk'
 ADMIN_ID = 5550550932
 ADMIN_GROUP_ID = -5046885109
 SUPPORT_USERNAME = "Ahnaf7x"  # তোমার পার্সোনাল ইউজারনেম
@@ -470,3 +470,4 @@ async def process_replacement_check(message: types.Message, state: FSMContext):
 if __name__ == '__main__':
     keep_alive()
     executor.start_polling(dp, skip_updates=True)
+
